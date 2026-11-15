@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# Set the COSMIC desktop wallpaper to NASA's Astronomy Picture of the Day.
+# Source 1: NASA's APOD RSS feed (science.nasa.gov/feed/apod-basic/).
+# Source 2: the APOD API (api.nasa.gov), used only if the feed fails.
+# Optional: put a free API key from https://api.nasa.gov in ~/.config/apod-wallpaper/api_key
+set -uo pipefail
+
+DIR="${APOD_DIR:-$HOME/Pictures/APOD}"
+KEY_FILE="$HOME/.config/apod-wallpaper/api_key"
+API_KEY="${APOD_API_KEY:-$( [ -r "$KEY_FILE" ] && tr -d '[:space:]' < "$KEY_FILE" || echo DEMO_KEY)}"
+FEED="https://science.nasa.gov/feed/apod-basic/"
+UA="apod-wallpaper/1.1"
+
+log() { echo "apod: $*" >&2; }
+mkdir -p "$DIR"
+
+# Wait up to ~2 minutes for the network (useful right after login).
+for _ in $(seq 1 24); do
+  curl -fsS -o /dev/null --max-time 10 -A "$UA" https://science.nasa.gov/ && break
+  sleep 5
+done
+
+date="" url="" title="" text=""
+
+from_feed() {
+  local xml out
+  xml=$(curl -fsSL --retry 3 --retry-all-errors --retry-max-time 90 --max-time 60 -A "$UA" "$FEED") || return 1
+  # Prints: date, image url, title, then the caption text.
+  out=$(python3 -I -c '
+import sys, re, html, xml.etree.ElementTree as ET
+from email.utils import parsedate_to_datetime
+from datetime import timezone
+root = ET.fromstring(sys.stdin.read())
+item = root.find("./channel/item")
+f = {c.tag.split("}")[-1]: (c.text or "").strip() for c in item}
+strip = lambda s: re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", "", s))).strip()
+date = parsedate_to_datetime(f["pubDate"]).astimezone(timezone.utc).strftime("%Y-%m-%d")
+url = html.unescape(f.get("hdurl", ""))
+if not url: sys.exit(1)
+title = strip(f.get("title", ""))
+credit = strip(f.get("credit", "") or f.get("copyright", ""))
+print(date); print(url); print(title)
+print(title); print(date + ("  Credit: " + credit if credit else ""))
+print(); print(strip(f.get("explanation", ""))); print(); print(f.get("link", ""))
+' <<<"$xml") || return 1
+  date=$(sed -n 1p <<<"$out"); url=$(sed -n 2p <<<"$out"); title=$(sed -n 3p <<<"$out")
+  text=$(sed -n '4,$p' <<<"$out")
+  [ -n "$date" ] && [ -n "$url" ]
+}
+
+from_api() {
+  local json
+  json=$(curl -fsS --retry 2 --retry-all-errors --retry-max-time 60 --max-time 30 -A "$UA" \
+    "https://api.nasa.gov/planetary/apod?api_key=${API_KEY}") || return 1
+  [ "$(jq -r '.media_type' <<<"$json")" = image ] || return 1
+  url=$(jq -r '.hdurl // .url // empty' <<<"$json")
+  [[ "$url" == */apod/* ]] || return 1        # reject placeholder/logo URLs
+  date=$(jq -r '.date' <<<"$json")
+  title=$(jq -r '.title // ""' <<<"$json")
+  text=$(jq -r '"\(.title)\n\(.date)\(if .copyright then "  ©" + (.copyright|gsub("\n";" ")) else "" end)\n\n\(.explanation // "")"' <<<"$json")
+}
+
+download() {  # $1 = url, $2 = dest; accept only real-looking images
+  curl -fsSL --retry 3 --retry-max-time 300 --max-time 300 -A "$UA" -o "$2.part" "$1" || { rm -f "$2.part"; return 1; }
+  if [ "$(stat -c %s "$2.part")" -lt 50000 ] || ! file -b --mime-type "$2.part" | grep -q '^image/'; then
+    rm -f "$2.part"; return 1
+  fi
+  mv "$2.part" "$2"
+}
+
+img=""
+for src in from_feed from_api; do
+  date="" url="" title="" text=""
+  $src || { log "$src: no usable image"; continue; }
+  path="${url%%\?*}"
+  ext="${path##*.}"; ext="${ext,,}"
+  case "$ext" in jpg|jpeg|png|gif|webp) ;; *) ext=jpg ;; esac
+  cand="$DIR/$date.$ext"
+  # NASA's dynamicimage URLs are resized copies; /content/dam/ is the original file.
+  orig="${path/\/dynamicimage\/assets\//\/content\/dam\/}"
+  if [ -s "$cand" ] || download "$orig" "$cand" || download "$url" "$cand"; then
+    img="$cand"; printf '%s\n' "$text" > "$DIR/$date.txt"; break
+  fi
+  log "$src: download failed for $url"
+done
+
+if [ -z "$img" ]; then
+  log "no image today (feed and API both failed); keeping current wallpaper"
+  exit 0
+fi
+
+# COSMIC keeps separate backgrounds for dark and light mode; update both.
+# Only the image path is changed; every other setting is kept. Files are
+# rewritten in place so cosmic-bg's file watcher picks up the change.
+esc=$(printf '%s' "$img" | sed 's/[\\"]/\\&/g; s/[&|]/\\&/g')
+updated=0
+for mode in Dark Light; do
+  cfg="$HOME/.config/cosmic/com.system76.CosmicBackground.$mode/v1/all"
+  def="/usr/share/cosmic/com.system76.CosmicBackground.$mode/v1/all"
+  if [ ! -f "$cfg" ]; then
+    [ -f "$def" ] || continue
+    mkdir -p "$(dirname "$cfg")"; cp "$def" "$cfg"
+  fi
+  new=$(sed -E "s|^([[:space:]]*source:[[:space:]]*).*$|\1Path(\"$esc\"),|" "$cfg")
+  if grep -q 'source: Path("' <<<"$new"; then
+    printf '%s\n' "$new" > "$cfg"; updated=$((updated+1))
+  else
+    log "unexpected config format in $cfg"
+  fi
+done
+[ "$updated" -gt 0 ] || { log "no COSMIC background config updated"; exit 1; }
+
+echo "apod: wallpaper set to $date — $title"

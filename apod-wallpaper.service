@@ -1,0 +1,7 @@
+[Unit]
+Description=Set COSMIC wallpaper to NASA's Astronomy Picture of the Day
+
+[Service]
+Type=oneshot
+TimeoutStartSec=15min
+ExecStart=%h/.local/bin/apod-wallpaper
