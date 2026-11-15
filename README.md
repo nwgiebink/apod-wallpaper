@@ -2,8 +2,9 @@
 
 Sets the [COSMIC](https://system76.com/cosmic) desktop wallpaper to NASA's
 [Astronomy Picture of the Day](https://science.nasa.gov/apod/) once a day.
-COSMIC can't load GNOME Shell extensions, so this is a small script plus a
-systemd user timer instead of a desktop applet.
+Recreates the [NASA APOD Wallpaper Changer gnome extension by Elinvention](https://extensions.gnome.org/extension/1202/nasa-apod/)
+for COSMIC in the form of a small script plus a systemd user timer instead 
+of a desktop applet.
 
 ## How it works
 
